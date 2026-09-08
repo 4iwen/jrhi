@@ -1,0 +1,6 @@
+*.pdb
+*.exe
+.build/
+examples/example
+examples/example.dSYM/
+.DS_Store

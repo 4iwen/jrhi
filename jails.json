@@ -1,0 +1,12 @@
+{
+    "local_modules": [
+        "modules"
+    ],
+    "roots": [
+        "module.jai",
+        "examples/triangle.jai"
+    ],
+    "build_root": "examples/triangle.jai",
+    "intermediate_path": ".build",
+    "use_symbols_from_local_modules": true
+}

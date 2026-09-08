@@ -1,0 +1,12 @@
+bin/
+.build/
+*.dSYM/
+*.dSYM
+examples/triangle
+examples/*.exe
+tests/instance
+tests/*.exe
+.DS_Store
+*.code-workspace
+imgui.ini
+.vscode/
