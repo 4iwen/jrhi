@@ -8,6 +8,7 @@
     build_tests(
         get_build_options(),
         "./specs",
-        module_paths = ".."
+        module_paths = "..",
+        run          = false,
     );
 }

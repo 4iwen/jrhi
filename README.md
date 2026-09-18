@@ -1,10 +1,18 @@
-# jrhi
+# JRHI
 
-A small Vulkan RHI written in Jai.
+A Vulkan RHI written in Jai.
 
 ## Features
 
-- Vulkan instance creation and destruction
+- Vulkan 1.3 instance and device creation
+- One automatically selected graphics GPU and queue
+- Optional Khronos validation layer
+- One JRHI context stored in Jai's implicit `Context`
+
+## Platform Support
+
+- macOS - tested on Apple Silicon with LunarG Vulkan SDK and MoltenVK
+- Windows and Linux - bindings are included but runtime support is not tested yet
 
 ## Cloning
 
@@ -12,26 +20,32 @@ A small Vulkan RHI written in Jai.
 git clone https://github.com/4iwen/jrhi.git
 ```
 
-## Examples
+## Development Setup
 
-Run an example from its directory:
+Install Jai and the [LunarG Vulkan SDK](https://vulkan.lunarg.com/sdk/home).
+
+Before building, source the SDK environment script:
 
 ```bash
-cd examples
-jai triangle.jai
-./triangle
+source <VulkanSDK-install>/setup-env.sh
+vulkaninfo --summary
+```
+
+## Examples
+
+```bash
+jai examples/triangle.jai
+./examples/triangle
 ```
 
 ## Testing
 
-Run all tests from the repository root:
-
 ```bash
 jai tests/run.jai
+./tests/test
 ```
 
 ## Dependencies
 
-- A Vulkan-capable graphics driver
 - [jai-vulkan](https://codeberg.org/St0wy/jai-vulkan) - Vulkan bindings
 - [Stubborn](https://github.com/rluba/stubborn) - Test assertions and matchers

@@ -5,6 +5,7 @@ bin/
 examples/triangle
 examples/*.exe
 tests/instance
+tests/test
 tests/*.exe
 .DS_Store
 *.code-workspace
