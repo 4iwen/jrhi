@@ -8,6 +8,9 @@ A Vulkan RHI written in Jai.
 - One automatically selected graphics GPU and queue
 - Optional Khronos validation layer
 - One JRHI context stored in Jai's implicit `Context`
+- CPU-writable GPU memory with 64-bit GPU addresses
+- Command lists for GPU fills and buffer copies
+- Explicit immediate and deferred memory freeing
 
 ## Platform Support
 
@@ -37,6 +40,12 @@ vulkaninfo --summary
 jai examples/triangle.jai
 ./examples/triangle
 ```
+
+## Current Limitations
+
+- Only one graphics queue and one recording command list are available.
+- `submit` waits for the GPU before returning.
+- If `submit` fails, destroy and recreate JRHI before using it again.
 
 ## Testing
 
