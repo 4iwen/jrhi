@@ -28,7 +28,7 @@ main :: () {
     // Allocate GPU memory for the triangle vertices.
     // memory.cpu lets the CPU write the allocation.
     // memory.gpu is the 64-bit address a shader will later use.
-    memory, allocation_result := JRHI.alloc(size_of([3] Vertex));
+    memory, allocation_result := JRHI.alloc(size_of([3] Vertex), access = .CPU_WRITE);
     if allocation_result != .SUCCESS {
         log("Could not allocate triangle memory: %.", allocation_result);
         return;

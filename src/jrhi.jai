@@ -23,13 +23,20 @@ Validation :: enum {
 // A 64-bit address that can be used by GPU shaders.
 GPU_Pointer :: #type,distinct u64;
 
+// Controls which processor can access an allocation through its CPU mapping.
+Memory_Access :: enum {
+    GPU_ONLY;  // GPU reads and writes; Memory.cpu is null.
+    CPU_WRITE; // CPU writes and GPU reads.
+    CPU_READ;  // GPU writes and CPU reads after JRHI.read.
+}
+
 // A list of GPU commands.
 // A command list is consumed and reset to zero by submit.
 Command_List :: #type,distinct u64;
 
-// One CPU-writable GPU memory allocation.
+// One GPU-addressable memory allocation.
 Memory :: struct {
-    cpu:  *void;        // A persistent CPU mapping of this allocation.
+    cpu:  *void;        // Persistent CPU mapping, or null for GPU_ONLY memory.
     gpu:  GPU_Pointer;  // The start of this allocation in GPU virtual memory.
     size: s64;          // The requested allocation size in bytes.
 }
@@ -83,9 +90,9 @@ destroy :: () {
     context.jrhi = null;
 }
 
-// Allocates CPU-writable, GPU-addressable memory.
+// Allocates GPU-addressable memory with the requested CPU access.
 // The returned Memory must not be copied and must later be passed to free or defer_free.
-alloc :: (allocation_size: s64) -> Memory, Result {
+alloc :: (allocation_size: s64, access: Memory_Access) -> Memory, Result {
     assert(allocation_size > 0, "JRHI allocation size must be greater than zero. Pass the number of bytes you need.");
 
     rhi := usable_context();
@@ -113,7 +120,7 @@ alloc :: (allocation_size: s64) -> Memory, Result {
     Vulkan.vkGetBufferMemoryRequirements(rhi.device, record.buffer, *memory_requirements);
 
     found_memory_type, memory_type_index, host_is_coherent :=
-        choose_cpu_write_memory_type(rhi, memory_requirements.memoryTypeBits);
+        choose_memory_type(rhi, memory_requirements.memoryTypeBits, access);
     if !found_memory_type then return .{}, .UNSUPPORTED;
 
     // This flag allows Vulkan to expose a 64-bit GPU address for the memory.
@@ -135,18 +142,20 @@ alloc :: (allocation_size: s64) -> Memory, Result {
     vulkan_result = Vulkan.vkBindBufferMemory(rhi.device, record.buffer, record.device_memory, 0);
     if vulkan_result != .SUCCESS then return .{}, result_from_vulkan(vulkan_result);
 
-    // Keep the allocation mapped so memory.cpu is always ready for CPU writes.
     mapped_memory: *void;
-    vulkan_result = Vulkan.vkMapMemory(
-        rhi.device,
-        record.device_memory,
-        0,
-        Vulkan.VK_WHOLE_SIZE,
-        0,
-        *mapped_memory,
-    );
-    if vulkan_result != .SUCCESS then return .{}, result_from_vulkan(vulkan_result);
-    record.owned_resources |= .MAPPED;
+    if access != .GPU_ONLY {
+        // Keep CPU-visible allocations mapped for their entire lifetime.
+        vulkan_result = Vulkan.vkMapMemory(
+            rhi.device,
+            record.device_memory,
+            0,
+            Vulkan.VK_WHOLE_SIZE,
+            0,
+            *mapped_memory,
+        );
+        if vulkan_result != .SUCCESS then return .{}, result_from_vulkan(vulkan_result);
+        record.owned_resources |= .MAPPED;
+    }
 
     // Ask Vulkan for the buffer's GPU virtual address.
     address_info: Vulkan.VkBufferDeviceAddressInfo;
@@ -158,11 +167,48 @@ alloc :: (allocation_size: s64) -> Memory, Result {
     if cast(u64) record.gpu == 0 then return .{}, .FAILED;
 
     record.size             = allocation_size;
+    record.access           = access;
     record.host_is_coherent = host_is_coherent;
     table_add(*rhi.memory_records, record.gpu, record);
 
     completed = true;
     return .{mapped_memory, record.gpu, allocation_size}, .SUCCESS;
+}
+
+// Makes GPU writes visible through memory.cpu.
+read :: (memory: *Memory) -> Result {
+    assert(memory != null, "JRHI memory does not exist. Pass a valid Memory pointer to JRHI.read.");
+    return read(memory, offset = 0, size = memory.size);
+}
+
+// Makes one GPU-written byte range visible through memory.cpu.
+read :: (memory: *Memory, offset: s64, size: s64) -> Result {
+    rhi := usable_context();
+    assert(memory != null,               "JRHI memory does not exist. Pass a valid Memory pointer to JRHI.read.");
+    assert(offset >= 0,                  "JRHI read offset must not be negative. Use a byte offset of zero or greater.");
+    assert(size > 0,                     "JRHI read size must be greater than zero. Pass the number of bytes to read.");
+    assert(offset <= memory.size,        "JRHI read offset is outside its memory allocation. Use an offset within memory.");
+    assert(size <= memory.size - offset, "JRHI read range is outside its memory allocation. Reduce size or choose a valid offset.");
+
+    record := memory_record(rhi, memory);
+    assert(
+        record.access == .CPU_READ,
+        "JRHI.read requires memory allocated with access = .CPU_READ. Allocate a CPU_READ memory value for GPU-to-CPU data."
+    );
+    assert(
+        record.recording_command_list == 0,
+        "JRHI.read cannot run while a command list uses this memory. Call JRHI.submit(*command_list) before reading it."
+    );
+
+    if record.host_is_coherent then return .SUCCESS;
+
+    range: Vulkan.VkMappedMemoryRange;
+    range.memory = record.device_memory;
+    range.offset = aligned_memory_offset(rhi, offset);
+    range.size   = Vulkan.VK_WHOLE_SIZE;
+
+    vulkan_result := Vulkan.vkInvalidateMappedMemoryRanges(rhi.device, 1, *range);
+    return result_from_vulkan(vulkan_result);
 }
 
 // Frees memory and resets the caller's Memory value to zero.
@@ -240,6 +286,10 @@ fill :: (
     assert(size % 4 == 0,                "JRHI fill size must be a multiple of four bytes. Vulkan fill writes repeated u32 values.");
 
     record := memory_record(rhi, memory);
+    assert(
+        record.access != .CPU_WRITE,
+        "JRHI.fill cannot write CPU_WRITE memory. Use access = .GPU_ONLY or .CPU_READ for GPU-written data."
+    );
     mark_memory_used(rhi, record);
     Vulkan.vkCmdFillBuffer(
         rhi.command_buffer,
@@ -248,6 +298,8 @@ fill :: (
         cast(Vulkan.VkDeviceSize) size,
         value,
     );
+
+    if record.access == .CPU_READ then make_gpu_writes_visible_to_cpu(rhi);
 }
 
 // Copies one byte range between two allocations.
@@ -274,6 +326,14 @@ copy :: (
     destination_record := memory_record(rhi, destination);
     source_record      := memory_record(rhi, source);
     assert(
+        source_record.access != .CPU_READ,
+        "JRHI.copy cannot read CPU_READ memory on the GPU. Use access = .GPU_ONLY or .CPU_WRITE for the source."
+    );
+    assert(
+        destination_record.access != .CPU_WRITE,
+        "JRHI.copy cannot write CPU_WRITE memory on the GPU. Use access = .GPU_ONLY or .CPU_READ for the destination."
+    );
+    assert(
         destination_record != source_record ||
         destination_offset + size <= source_offset ||
         source_offset + size <= destination_offset,
@@ -295,6 +355,8 @@ copy :: (
         1,
         *region,
     );
+
+    if destination_record.access == .CPU_READ then make_gpu_writes_visible_to_cpu(rhi);
 }
 
 // Ends, submits, waits for, and consumes command_list.
@@ -302,6 +364,13 @@ submit :: (command_list: *Command_List) -> Result {
     rhi := usable_context();
     assert_command_list(rhi, command_list);
     defer consume_command_list(rhi, command_list);
+
+    result := flush_cpu_writes(rhi);
+    if result != .SUCCESS {
+        discard_command_list(rhi);
+        rhi.usable = false;
+        return result;
+    }
 
     vulkan_result := Vulkan.vkEndCommandBuffer(rhi.command_buffer);
     if vulkan_result != .SUCCESS {
@@ -420,7 +489,8 @@ Memory_Record :: struct {
     buffer:           Vulkan.VkBuffer;        // Buffer that gives the allocation its GPU address.
     device_memory:    Vulkan.VkDeviceMemory;  // Vulkan memory bound to buffer.
     size:             s64;                    // Requested byte count, not Vulkan's aligned allocation size.
-    host_is_coherent: bool;                   // False means future submission must flush CPU writes.
+    access:           Memory_Access;          // CPU mapping direction selected at allocation.
+    host_is_coherent: bool;                   // False means CPU cache management is required.
     owned_resources:  Memory_Owned_Resources; // Handles that need cleanup after partial creation.
     recording_command_list: u64;              // Active command list that currently references this memory.
 
@@ -499,7 +569,56 @@ destroy_deferred_memory :: (rhi: *JRHI_Context) {
     array_reset_keeping_memory(*rhi.deferred_memory);
 }
 
+aligned_memory_offset :: (rhi: *JRHI_Context, offset: s64) -> Vulkan.VkDeviceSize {
+    properties: Vulkan.VkPhysicalDeviceProperties;
+    Vulkan.vkGetPhysicalDeviceProperties(rhi.physical_gpu, *properties);
+
+    atom_size := cast(s64) properties.limits.nonCoherentAtomSize;
+    return cast(Vulkan.VkDeviceSize) (offset - offset % atom_size);
+}
+
+flush_cpu_writes :: (rhi: *JRHI_Context) -> Result {
+    for * record: rhi.memory_records {
+        if record.recording_command_list != rhi.active_command_list then continue;
+        if record.access != .CPU_WRITE || record.host_is_coherent then continue;
+
+        range: Vulkan.VkMappedMemoryRange;
+        range.memory = record.device_memory;
+        range.offset = 0;
+        range.size   = Vulkan.VK_WHOLE_SIZE;
+
+        vulkan_result := Vulkan.vkFlushMappedMemoryRanges(rhi.device, 1, *range);
+        if vulkan_result != .SUCCESS then return result_from_vulkan(vulkan_result);
+    }
+
+    return .SUCCESS;
+}
+
+// Makes preceding transfer writes available to a later CPU read.
+make_gpu_writes_visible_to_cpu :: (rhi: *JRHI_Context) {
+    barrier: Vulkan.VkMemoryBarrier;
+    barrier.srcAccessMask = .TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = .HOST_READ_BIT;
+
+    Vulkan.vkCmdPipelineBarrier(
+        rhi.command_buffer,
+        .TRANSFER_BIT,
+        .HOST_BIT,
+        0,
+        1,
+        *barrier,
+        0,
+        null,
+        0,
+        null,
+    );
+}
+
 result_from_vulkan :: (result: Vulkan.VkResult) -> Result {
+    if result == .SUCCESS {
+        return .SUCCESS;
+    }
+
     if result == .ERROR_OUT_OF_HOST_MEMORY || result == .ERROR_OUT_OF_DEVICE_MEMORY {
         return .OUT_OF_MEMORY;
     }
@@ -507,9 +626,10 @@ result_from_vulkan :: (result: Vulkan.VkResult) -> Result {
     return .FAILED;
 }
 
-choose_cpu_write_memory_type :: (
+choose_memory_type :: (
     rhi: *JRHI_Context,
     memory_type_bits: u32,
+    access: Memory_Access,
 ) -> bool, u32, bool {
     // Read the memory heaps and memory types exposed by the chosen GPU.
     memory_properties: Vulkan.VkPhysicalDeviceMemoryProperties;
@@ -519,22 +639,36 @@ choose_cpu_write_memory_type :: (
     best_index: u32;
     best_is_coherent := false;
 
-    // A host-visible type is required. Prefer coherent memory, then local memory.
     for memory_type, index: memory_properties.memoryTypes {
         if index >= memory_properties.memoryTypeCount then break;
 
         memory_type_bit: u32 = cast(u32) 1 << cast(u32) index;
-        if !(memory_type_bits & memory_type_bit)            then continue;
-        if !(memory_type.propertyFlags & .HOST_VISIBLE_BIT) then continue;
+        if !(memory_type_bits & memory_type_bit) then continue;
+
+        is_host_visible := (memory_type.propertyFlags & .HOST_VISIBLE_BIT)  != 0;
+        is_coherent     := (memory_type.propertyFlags & .HOST_COHERENT_BIT) != 0;
+        is_cached       := (memory_type.propertyFlags & .HOST_CACHED_BIT)   != 0;
+        is_device_local := (memory_type.propertyFlags & .DEVICE_LOCAL_BIT)  != 0;
+
+        if access != .GPU_ONLY && !is_host_visible then continue;
 
         score: s32;
-        if memory_type.propertyFlags & .HOST_COHERENT_BIT then score += 2;
-        if memory_type.propertyFlags & .DEVICE_LOCAL_BIT  then score += 1;
+        if access == .GPU_ONLY {
+            if is_device_local  then score += 2;
+            if !is_host_visible then score += 1;
+        } else if access == .CPU_WRITE {
+            if is_coherent     then score += 2;
+            if is_device_local then score += 1;
+        } else {
+            if is_cached       then score += 2;
+            if is_coherent     then score += 1;
+            if is_device_local then score += 1;
+        }
 
         if score > best_score {
             best_score       = score;
             best_index       = cast(u32) index;
-            best_is_coherent = (memory_type.propertyFlags & .HOST_COHERENT_BIT) != 0;
+            best_is_coherent = is_coherent;
         }
     }
 

@@ -8,7 +8,7 @@ A Vulkan RHI written in Jai.
 - One automatically selected graphics GPU and queue
 - Optional Khronos validation layer
 - One JRHI context stored in Jai's implicit `Context`
-- CPU-writable GPU memory with 64-bit GPU addresses
+- GPU-only, CPU-write, and CPU-read memory with 64-bit GPU addresses
 - Command lists for GPU fills and buffer copies
 - Explicit immediate and deferred memory freeing
 

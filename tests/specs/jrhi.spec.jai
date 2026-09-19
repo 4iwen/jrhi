@@ -44,7 +44,7 @@ can_allocate_cpu_write_memory :: () {
     if create_result != .SUCCESS then return;
     defer JRHI.destroy();
 
-    memory, allocation_result := JRHI.alloc(64);
+    memory, allocation_result := JRHI.alloc(64, access = .CPU_WRITE);
     assert_that(allocation_result, is(JRHI.Result.SUCCESS));
     if allocation_result != .SUCCESS then return;
 
@@ -63,6 +63,14 @@ can_allocate_cpu_write_memory :: () {
     assert_that(memory.cpu == null, is(true));
     assert_that(cast(u64) memory.gpu == 0, is(true));
     assert_that(memory.size == 0, is(true));
+
+    gpu_memory, gpu_allocation_result := JRHI.alloc(64, access = .GPU_ONLY);
+    assert_that(gpu_allocation_result, is(JRHI.Result.SUCCESS));
+    if gpu_allocation_result != .SUCCESS then return;
+
+    assert_that(gpu_memory.cpu == null, is(true));
+    assert_that(cast(u64) gpu_memory.gpu != 0, is(true));
+    JRHI.free(*gpu_memory);
 } @Test
 
 can_record_and_submit_fill :: () {
@@ -71,7 +79,7 @@ can_record_and_submit_fill :: () {
     if create_result != .SUCCESS then return;
     defer JRHI.destroy();
 
-    memory, allocation_result := JRHI.alloc(64);
+    memory, allocation_result := JRHI.alloc(64, access = .CPU_READ);
     assert_that(allocation_result, is(JRHI.Result.SUCCESS));
     if allocation_result != .SUCCESS then return;
     defer JRHI.free(*memory);
@@ -86,6 +94,11 @@ can_record_and_submit_fill :: () {
     assert_that(submit_result, is(JRHI.Result.SUCCESS));
     assert_that(cast(u64) command_list == 0, is(true));
 
+    read_result := JRHI.read(*memory);
+    assert_that(read_result, is(JRHI.Result.SUCCESS));
+    values := cast(*u32) memory.cpu;
+    assert_that(values.*, is(0x44332211));
+
     command_list, begin_result = JRHI.begin_command_list();
     assert_that(begin_result, is(JRHI.Result.SUCCESS));
     if begin_result != .SUCCESS then return;
@@ -95,6 +108,10 @@ can_record_and_submit_fill :: () {
     submit_result = JRHI.submit(*command_list);
     assert_that(submit_result, is(JRHI.Result.SUCCESS));
     assert_that(cast(u64) command_list == 0, is(true));
+
+    read_result = JRHI.read(*memory, offset = 0, size = 64);
+    assert_that(read_result, is(JRHI.Result.SUCCESS));
+    assert_that(values.*, is(0x44332211));
 } @Test
 
 can_copy_and_defer_free_memory :: () {
@@ -103,22 +120,25 @@ can_copy_and_defer_free_memory :: () {
     if create_result != .SUCCESS then return;
     defer JRHI.destroy();
 
-    source, source_result := JRHI.alloc(64);
+    source, source_result := JRHI.alloc(64, access = .CPU_WRITE);
     assert_that(source_result, is(JRHI.Result.SUCCESS));
     if source_result != .SUCCESS then return;
 
-    destination, destination_result := JRHI.alloc(64);
+    destination, destination_result := JRHI.alloc(64, access = .CPU_READ);
     assert_that(destination_result, is(JRHI.Result.SUCCESS));
     if destination_result != .SUCCESS then return;
     defer JRHI.free(*destination);
 
-    unrelated, unrelated_result := JRHI.alloc(64);
+    unrelated, unrelated_result := JRHI.alloc(64, access = .GPU_ONLY);
     assert_that(unrelated_result, is(JRHI.Result.SUCCESS));
     if unrelated_result != .SUCCESS then return;
 
     command_list, begin_result := JRHI.begin_command_list();
     assert_that(begin_result, is(JRHI.Result.SUCCESS));
     if begin_result != .SUCCESS then return;
+
+    source_values := cast(*u32) source.cpu;
+    source_values.* = 0x11223344;
 
     JRHI.copy(
         *command_list,
@@ -138,4 +158,9 @@ can_copy_and_defer_free_memory :: () {
     submit_result := JRHI.submit(*command_list);
     assert_that(submit_result, is(JRHI.Result.SUCCESS));
     assert_that(cast(u64) command_list == 0, is(true));
+
+    read_result := JRHI.read(*destination, offset = 0, size = 4);
+    assert_that(read_result, is(JRHI.Result.SUCCESS));
+    destination_values := cast(*u32) destination.cpu;
+    assert_that(destination_values.*, is(0x11223344));
 } @Test
